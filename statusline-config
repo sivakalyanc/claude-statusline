@@ -1,0 +1,28 @@
+# Claude Code Dashboard Statusline Configuration
+# ────────────────────────────────────────────────
+# Edit values below, or use /user-statusline to change interactively.
+# Changes take effect on the next Claude Code prompt refresh.
+
+# Toggle segments (true/false)
+show_model=true
+show_dir=true
+show_git=true
+show_cost=true
+show_burn_rate=true
+show_context=true
+show_rate_limits=true
+show_tokens=false
+show_duration=true
+show_vim_mode=true
+show_lines=false
+show_version=false
+show_effort=true
+
+# Git detail: basic (branch + dirty) | full (branch + dirty + untracked + ahead/behind)
+git_detail=full
+
+# Progress bar style: blocks (█░) | dots (●○) | geometric (▰▱) | line (━┄)
+bar_style=dots
+
+# Progress bar width (number of characters)
+bar_width=10

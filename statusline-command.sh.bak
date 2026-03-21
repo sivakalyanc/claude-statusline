@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Claude Code statusLine — mirrors Starship prompt style
+# Format: user@host dir [branch status] | model | ctx%
+
+input=$(cat)
+
+cwd=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // empty')
+model=$(echo "$input" | jq -r '.model.display_name // empty')
+remaining=$(echo "$input" | jq -r '.context_window.remaining_percentage // empty')
+vim_mode=$(echo "$input" | jq -r '.vim.mode // empty')
+
+# --- user@host ---
+user=$(whoami)
+host=$(hostname -s)
+
+# --- directory (truncate to last 3 segments, like Starship truncation_length=5) ---
+if [ -n "$cwd" ]; then
+  dir=$(echo "$cwd" | awk -F'/' '{
+    n=split($0,a,"/");
+    if (n<=4) { print $0 }
+    else { printf "..."; for(i=n-2;i<=n;i++) printf "/%s", a[i]; print "" }
+  }')
+else
+  dir=$(pwd | awk -F'/' '{
+    n=split($0,a,"/");
+    if (n<=4) { print $0 }
+    else { printf "..."; for(i=n-2;i<=n;i++) printf "/%s", a[i]; print "" }
+  }')
+fi
+
+# --- git branch + status (skip locks to avoid contention) ---
+git_part=""
+if git -C "${cwd:-$(pwd)}" rev-parse --git-dir >/dev/null 2>&1; then
+  branch=$(git -C "${cwd:-$(pwd)}" symbolic-ref --short HEAD 2>/dev/null \
+           || git -C "${cwd:-$(pwd)}" rev-parse --short HEAD 2>/dev/null)
+  # check dirty state without acquiring index lock
+  if git -C "${cwd:-$(pwd)}" diff --no-index --quiet /dev/null /dev/null 2>/dev/null; then true; fi
+  dirty=""
+  if ! git -C "${cwd:-$(pwd)}" diff --quiet 2>/dev/null || \
+     ! git -C "${cwd:-$(pwd)}" diff --cached --quiet 2>/dev/null; then
+    dirty="*"
+  fi
+  untracked=""
+  if [ -n "$(git -C "${cwd:-$(pwd)}" ls-files --others --exclude-standard 2>/dev/null | head -1)" ]; then
+    untracked="?"
+  fi
+  if [ -n "$branch" ]; then
+    git_part=" ${branch}${dirty}${untracked}"
+  fi
+fi
+
+# --- context window ---
+ctx_part=""
+if [ -n "$remaining" ]; then
+  ctx_part=" ctx:${remaining}%"
+fi
+
+# --- vim mode ---
+vim_part=""
+if [ -n "$vim_mode" ]; then
+  vim_part=" [${vim_mode}]"
+fi
+
+# --- model (short label) ---
+model_part=""
+if [ -n "$model" ]; then
+  model_part=" ${model}"
+fi
+
+# --- assemble with ANSI colors ---
+# user@host: bold white; dir: bright blue; git: orange; meta: dim cyan
+printf "\033[1m%s@%s\033[0m \033[94m%s\033[0m\033[38;5;215m%s\033[0m\033[36m%s%s\033[0m\033[2m%s\033[0m" \
+  "$user" "$host" "$dir" "$git_part" "$ctx_part" "$vim_part" "$model_part"
