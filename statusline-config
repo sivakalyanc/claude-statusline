@@ -11,12 +11,17 @@ show_cost=true
 show_burn_rate=true
 show_context=true
 show_rate_limits=true
-show_tokens=false
+show_tokens=true
 show_duration=true
 show_vim_mode=true
-show_lines=false
-show_version=false
+show_lines=true
+show_version=true
 show_effort=true
+show_cache=true
+show_api_time=true
+show_ctx_size=true
+show_cost_per_line=true
+show_ctx_warning=true
 
 # Git detail: basic (branch + dirty) | full (branch + dirty + untracked + ahead/behind)
 git_detail=full
