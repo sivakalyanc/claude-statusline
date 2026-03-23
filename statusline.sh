@@ -329,9 +329,24 @@ render_dashboard() {
   if [[ "$show_context" == "true" && -n "$j_ctx_used" ]]; then
     local ctx_c; ctx_c=$(color_for_used "$j_ctx_used")
     local ctx_bar; ctx_bar=$(progress_bar "$j_ctx_used")
+    local ctx_tokens_used=""
+    if [[ -n "$j_ctx_size" && "$j_ctx_size" != "0" ]]; then
+      local raw_used=$(awk "BEGIN{printf \"%.0f\", $j_ctx_used * $j_ctx_size / 100}" 2>/dev/null)
+      if [[ -n "$raw_used" ]]; then
+        local used_fmt
+        if (( raw_used >= 1000000 )); then
+          used_fmt="$((raw_used / 1000000))M"
+        elif (( raw_used >= 1000 )); then
+          used_fmt="$((raw_used / 1000))K"
+        else
+          used_fmt="$raw_used"
+        fi
+        ctx_tokens_used=" ${used_fmt}/${ctx_size_str}"
+      fi
+    fi
     line2+="$(c "$ctx_c")ctx ${ctx_bar} ${j_ctx_used}%${RST}"
-    if [[ -n "$ctx_size_str" ]]; then
-      line2+="$(c "$FG_GRAY")[${ctx_size_str}]${RST}"
+    if [[ -n "$ctx_tokens_used" ]]; then
+      line2+="$(c "$FG_GRAY")${ctx_tokens_used}${RST}"
     fi
   fi
   if [[ -n "$cost_str" ]]; then
