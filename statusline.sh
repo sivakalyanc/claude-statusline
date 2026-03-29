@@ -53,32 +53,73 @@ eval "$(echo "$input" | jq -r '
   def s(f): f // "" | tostring | gsub("'\''"; "'\''\\'\'''\''");
   @sh "j_model=\(s(.model.display_name))",
   @sh "j_cwd=\(s(.workspace.current_dir))",
-  @sh "j_cost=\(s(.cost.total_cost_usd))",
-  @sh "j_duration=\(s(.cost.total_duration_ms))",
-  @sh "j_lines_add=\(s(.cost.total_lines_added))",
-  @sh "j_lines_rm=\(s(.cost.total_lines_removed))",
   @sh "j_ctx_used=\(s(.context_window.used_percentage))",
+  @sh "j_ctx_remaining=\(s(.context_window.remaining_percentage))",
   @sh "j_ctx_size=\(s(.context_window.context_window_size))",
   @sh "j_tok_in=\(s(.context_window.total_input_tokens))",
   @sh "j_tok_out=\(s(.context_window.total_output_tokens))",
   @sh "j_cache_read=\(s(.context_window.current_usage.cache_read_input_tokens))",
   @sh "j_cache_create=\(s(.context_window.current_usage.cache_creation_input_tokens))",
   @sh "j_cur_input=\(s(.context_window.current_usage.input_tokens))",
+  @sh "j_cur_output=\(s(.context_window.current_usage.output_tokens))",
+  @sh "j_has_usage=\(if .context_window.current_usage != null then "true" else "false" end)",
+  @sh "j_cost=\(s(.cost.total_cost_usd))",
+  @sh "j_duration=\(s(.cost.total_duration_ms))",
   @sh "j_api_duration=\(s(.cost.total_api_duration_ms))",
+  @sh "j_lines_add=\(s(.cost.total_lines_added))",
+  @sh "j_lines_rm=\(s(.cost.total_lines_removed))",
   @sh "j_rl5_used=\(s(.rate_limits.five_hour.used_percentage))",
   @sh "j_rl5_reset=\(s(.rate_limits.five_hour.resets_at))",
   @sh "j_rl7_used=\(s(.rate_limits.seven_day.used_percentage))",
   @sh "j_rl7_reset=\(s(.rate_limits.seven_day.resets_at))",
   @sh "j_vim=\(s(.vim.mode))",
   @sh "j_version=\(s(.version))",
-  @sh "j_exceed=\(s(.exceeds_200k_tokens))",
-  @sh "j_output_style=\(s(.output_style.name))"
+  @sh "j_output_style=\(s(.output_style.name))",
+  @sh "j_session_name=\(s(.session_name))"
 ' 2>/dev/null)"
 
 # ── Effort level from settings.json ─────────────────────────────
 j_effort=""
 if [[ "$show_effort" == "true" && -f "$HOME/.claude/settings.json" ]]; then
   j_effort=$(jq -r '.effortLevel // empty' "$HOME/.claude/settings.json" 2>/dev/null)
+fi
+
+# ── Cumulative cost tracking ──────────────────────────────────
+COST_TRACKER="$HOME/.claude/cost-tracker.json"
+if [[ ! -f "$COST_TRACKER" ]]; then
+  echo '{"cumulative_usd":0,"session_count":0,"last_session_usd":0,"session_id":""}' > "$COST_TRACKER"
+fi
+cumulative_usd=$(jq -r '.cumulative_usd // 0' "$COST_TRACKER" 2>/dev/null || echo "0")
+if [[ -n "$j_cost" && "$j_cost" != "0" && "$j_cost" != "" ]]; then
+  last_session=$(jq -r '.last_session_usd // 0' "$COST_TRACKER" 2>/dev/null || echo "0")
+  stored_sid=$(jq -r '.session_id // ""' "$COST_TRACKER" 2>/dev/null || echo "")
+  current_sid="${j_session_name:-}"
+
+  # Detect new session: prefer session name, fall back to cost-drop heuristic
+  is_new_session=0
+  if [[ -n "$current_sid" && -n "$stored_sid" && "$current_sid" != "$stored_sid" ]]; then
+    # Session name changed → definitely new session
+    is_new_session=1
+  elif [[ -z "$current_sid" || -z "$stored_sid" ]]; then
+    # No reliable session name — fall back to cost comparison (with threshold to avoid float noise)
+    is_new_session=$(awk "BEGIN{print ($j_cost + 0.01 < $last_session) ? 1 : 0}" 2>/dev/null || echo "0")
+  fi
+
+  if [[ "$is_new_session" == "1" ]]; then
+    # New session — previous cost already baked in, add new cost
+    new_cumulative=$(awk "BEGIN{printf \"%.4f\", $cumulative_usd + $j_cost}" 2>/dev/null)
+  else
+    # Same session — idempotent: replace last snapshot with current
+    new_cumulative=$(awk "BEGIN{printf \"%.4f\", $cumulative_usd - $last_session + $j_cost}" 2>/dev/null)
+  fi
+
+  if [[ -n "$new_cumulative" ]]; then
+    jq --argjson c "$new_cumulative" --argjson s "$j_cost" --arg sid "$current_sid" \
+      '.cumulative_usd = $c | .last_session_usd = $s | .session_id = $sid' \
+      "$COST_TRACKER" > "${COST_TRACKER}.tmp" \
+      && mv "${COST_TRACKER}.tmp" "$COST_TRACKER" 2>/dev/null
+    cumulative_usd="$new_cumulative"
+  fi
 fi
 
 # ── Directory shortening ────────────────────────────────────────
@@ -325,54 +366,74 @@ render_dashboard() {
     line1+="$(c "$FG_GRAY")v${j_version}${RST}"
   fi
 
-  # ── Line 2: context │ cost │ burn │ cost/line │ cache
-  if [[ "$show_context" == "true" && -n "$j_ctx_used" ]]; then
-    local ctx_c; ctx_c=$(color_for_used "$j_ctx_used")
-    local ctx_bar; ctx_bar=$(progress_bar "$j_ctx_used")
-    local ctx_tokens_used=""
-    if [[ -n "$j_ctx_size" && "$j_ctx_size" != "0" ]]; then
-      local raw_used=$(awk "BEGIN{printf \"%.0f\", $j_ctx_used * $j_ctx_size / 100}" 2>/dev/null)
-      if [[ -n "$raw_used" ]]; then
-        local used_fmt
-        if (( raw_used >= 1000000 )); then
-          used_fmt="$((raw_used / 1000000))M"
-        elif (( raw_used >= 1000 )); then
-          used_fmt="$((raw_used / 1000))K"
-        else
-          used_fmt="$raw_used"
+  # ── Line 2: context │ cache │ current call tokens
+  if [[ "$show_context" == "true" ]]; then
+    if [[ "$j_has_usage" == "true" && -n "$j_ctx_used" && "$j_ctx_used" != "0" ]]; then
+      # We have real context data
+      local ctx_c; ctx_c=$(color_for_used "$j_ctx_used")
+      local ctx_bar; ctx_bar=$(progress_bar "$j_ctx_used")
+      local ctx_tokens_used=""
+      if [[ -n "$j_ctx_size" && "$j_ctx_size" != "0" ]]; then
+        local raw_used; raw_used=$(awk "BEGIN{printf \"%.0f\", $j_ctx_used * $j_ctx_size / 100}" 2>/dev/null)
+        if [[ -n "$raw_used" ]]; then
+          local used_fmt
+          if (( raw_used >= 1000000 )); then
+            used_fmt="$((raw_used / 1000000))M"
+          elif (( raw_used >= 1000 )); then
+            used_fmt="$((raw_used / 1000))K"
+          else
+            used_fmt="$raw_used"
+          fi
+          ctx_tokens_used=" ${used_fmt}/${ctx_size_str}"
         fi
-        ctx_tokens_used=" ${used_fmt}/${ctx_size_str}"
       fi
-    fi
-    line2+="$(c "$ctx_c")ctx ${ctx_bar} ${j_ctx_used}%${RST}"
-    if [[ -n "$ctx_tokens_used" ]]; then
-      line2+="$(c "$FG_GRAY")${ctx_tokens_used}${RST}"
+      local ctx_used_pct; ctx_used_pct=$(printf "%.1f" "$j_ctx_used" 2>/dev/null || echo "$j_ctx_used")
+      local ctx_rem_pct=""
+      if [[ -n "$j_ctx_remaining" && "$j_ctx_remaining" != "0" ]]; then
+        ctx_rem_pct=" $(printf "%.1f" "$j_ctx_remaining" 2>/dev/null || echo "$j_ctx_remaining")% rem"
+      fi
+      line2+="$(c "$ctx_c")ctx ${ctx_bar} ${ctx_used_pct}% used${RST}"
+      if [[ -n "$ctx_tokens_used" ]]; then
+        line2+="$(c "$FG_GRAY")${ctx_tokens_used}${RST}"
+      fi
+      if [[ -n "$ctx_rem_pct" ]]; then
+        line2+="$(c "$FG_GRAY")${ctx_rem_pct}${RST}"
+      fi
+    elif [[ -n "$j_ctx_size" && "$j_ctx_size" != "0" ]]; then
+      # No messages yet — show window size and waiting indicator
+      line2+="$(c "$FG_GRAY")ctx ░░░░░░░░░░ waiting… (window: ${ctx_size_str})${RST}"
     fi
   fi
+  # Session cost
   if [[ -n "$cost_str" ]]; then
     [[ -n "$line2" ]] && line2+="$sep"
-    line2+="$(c "$FG_GREEN")${cost_str}${RST}"
+    line2+="$(c "$FG_GOLD")${cost_str}${RST}"
   fi
-  if [[ -n "$burn_str" ]]; then
+  # Cumulative cost (across all sessions)
+  if [[ -n "$cumulative_usd" && "$cumulative_usd" != "0" ]]; then
+    local cum_fmt; cum_fmt=$(printf "%.2f" "$cumulative_usd" 2>/dev/null || echo "$cumulative_usd")
     [[ -n "$line2" ]] && line2+="$sep"
-    line2+="$(c "$FG_PEACH")${burn_str}${RST}"
+    line2+="$(c "$FG_PEACH")total: \$${cum_fmt}${RST}"
   fi
-  if [[ -n "$cpl_str" ]]; then
+  # Duration
+  if [[ -n "$duration_str" ]]; then
     [[ -n "$line2" ]] && line2+="$sep"
-    line2+="$(c "$FG_GOLD")${cpl_str}${RST}"
+    line2+="$(c "$FG_GRAY")${duration_str}${RST}"
   fi
+  # Cache hit ratio
   if [[ -n "$cache_str" ]]; then
     [[ -n "$line2" ]] && line2+="$sep"
     line2+="$(c "$FG_MINT")${cache_str}${RST}"
   fi
-
-  # ── Line 3: session │ api │ rate limits │ tokens │ lines
-  if [[ -n "$duration_str" ]]; then
-    line3+="$(c "$FG_CYAN")${duration_str}${RST}"
+  # Lines changed
+  if [[ -n "$lines_str" ]]; then
+    [[ -n "$line2" ]] && line2+="$sep"
+    line2+="$(c "$FG_GREEN")${lines_str}${RST}"
   fi
-  if [[ -n "$api_time_str" ]]; then
-    [[ -n "$line3" ]] && line3+="$sep"
-    line3+="$(c "$FG_CYAN")${api_time_str}${RST}"
+
+  # ── Line 3: session name │ rate limits │ tokens │ output style
+  if [[ -n "$j_session_name" ]]; then
+    line3+="$(c "$FG_CYAN")session: ${j_session_name}${RST}"
   fi
   if [[ "$show_rate_limits" == "true" && -n "$j_rl5_used" ]]; then
     [[ -n "$line3" ]] && line3+="$sep"
@@ -391,18 +452,29 @@ render_dashboard() {
     [[ -n "$line3" ]] && line3+="$sep"
     line3+="$(c "$FG_LAVENDER")${tok_str}${RST}"
   fi
-  if [[ -n "$lines_str" ]]; then
+  if [[ -n "$burn_str" ]]; then
     [[ -n "$line3" ]] && line3+="$sep"
-    line3+="$(c "$FG_MINT")${lines_str}${RST}"
+    line3+="$(c "$FG_PEACH")${burn_str}${RST}"
+  fi
+  if [[ -n "$api_time_str" ]]; then
+    [[ -n "$line3" ]] && line3+="$sep"
+    line3+="$(c "$FG_GRAY")${api_time_str}${RST}"
+  fi
+  if [[ -n "$cpl_str" ]]; then
+    [[ -n "$line3" ]] && line3+="$sep"
+    line3+="$(c "$FG_GOLD")${cpl_str}${RST}"
+  fi
+  if [[ -n "$j_output_style" ]]; then
+    [[ -n "$line3" ]] && line3+="$sep"
+    line3+="$(c "$FG_GRAY")style: ${j_output_style}${RST}"
   fi
 
   # ── Line 4: warnings (only shown when needed)
   local line4=""
-  if [[ "$show_ctx_warning" == "true" && "$j_exceed" == "true" ]]; then
-    line4+="$(c "$FG_RED")⚠ context exceeds 200K tokens${RST}"
-  fi
   local ctx_pct="${j_ctx_used:-0}"; ctx_pct="${ctx_pct%.*}"
-  if [[ "$show_ctx_warning" == "true" && "$ctx_pct" -ge 80 && "$j_exceed" != "true" ]]; then
+  if [[ "$show_ctx_warning" == "true" && "$j_has_usage" == "true" && "$ctx_pct" -ge 90 ]]; then
+    line4+="$(c "$FG_RED")⚠ context at ${ctx_pct}% — consider /compact${RST}"
+  elif [[ "$show_ctx_warning" == "true" && "$j_has_usage" == "true" && "$ctx_pct" -ge 80 ]]; then
     line4+="$(c "$FG_ORANGE")⚠ context usage at ${ctx_pct}%${RST}"
   fi
   local rl5_pct="${j_rl5_used:-0}"; rl5_pct="${rl5_pct%.*}"
