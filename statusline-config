@@ -26,8 +26,8 @@ show_ctx_warning=true
 # Git detail: basic (branch + dirty) | full (branch + dirty + untracked + ahead/behind)
 git_detail=full
 
-# Progress bar style: blocks (█░) | dots (●○) | geometric (▰▱) | line (━┄)
-bar_style=dots
+# Progress bar style: segments (▊░ 75% width, 25% gap) | blocks (█░) | dots (●○) | geometric (▰▱) | line (━┄)
+bar_style=segments
 
 # Progress bar width (number of characters)
 bar_width=10

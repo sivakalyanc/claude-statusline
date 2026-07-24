@@ -84,43 +84,7 @@ if [[ "$show_effort" == "true" && -f "$HOME/.claude/settings.json" ]]; then
   j_effort=$(jq -r '.effortLevel // empty' "$HOME/.claude/settings.json" 2>/dev/null)
 fi
 
-# ── Cumulative cost tracking ──────────────────────────────────
-COST_TRACKER="$HOME/.claude/cost-tracker.json"
-if [[ ! -f "$COST_TRACKER" ]]; then
-  echo '{"cumulative_usd":0,"session_count":0,"last_session_usd":0,"session_id":""}' > "$COST_TRACKER"
-fi
-cumulative_usd=$(jq -r '.cumulative_usd // 0' "$COST_TRACKER" 2>/dev/null || echo "0")
-if [[ -n "$j_cost" && "$j_cost" != "0" && "$j_cost" != "" ]]; then
-  last_session=$(jq -r '.last_session_usd // 0' "$COST_TRACKER" 2>/dev/null || echo "0")
-  stored_sid=$(jq -r '.session_id // ""' "$COST_TRACKER" 2>/dev/null || echo "")
-  current_sid="${j_session_name:-}"
-
-  # Detect new session: prefer session name, fall back to cost-drop heuristic
-  is_new_session=0
-  if [[ -n "$current_sid" && -n "$stored_sid" && "$current_sid" != "$stored_sid" ]]; then
-    # Session name changed → definitely new session
-    is_new_session=1
-  elif [[ -z "$current_sid" || -z "$stored_sid" ]]; then
-    # No reliable session name — fall back to cost comparison (with threshold to avoid float noise)
-    is_new_session=$(awk "BEGIN{print ($j_cost + 0.01 < $last_session) ? 1 : 0}" 2>/dev/null || echo "0")
-  fi
-
-  if [[ "$is_new_session" == "1" ]]; then
-    # New session — previous cost already baked in, add new cost
-    new_cumulative=$(awk "BEGIN{printf \"%.4f\", $cumulative_usd + $j_cost}" 2>/dev/null)
-  else
-    # Same session — idempotent: replace last snapshot with current
-    new_cumulative=$(awk "BEGIN{printf \"%.4f\", $cumulative_usd - $last_session + $j_cost}" 2>/dev/null)
-  fi
-
-  if [[ -n "$new_cumulative" ]]; then
-    jq --argjson c "$new_cumulative" --argjson s "$j_cost" --arg sid "$current_sid" \
-      '.cumulative_usd = $c | .last_session_usd = $s | .session_id = $sid' \
-      "$COST_TRACKER" > "${COST_TRACKER}.tmp" \
-      && mv "${COST_TRACKER}.tmp" "$COST_TRACKER" 2>/dev/null
-    cumulative_usd="$new_cumulative"
-  fi
-fi
+# ── Cumulative/total cost tracking removed (total no longer displayed) ──
 
 # ── Directory shortening ────────────────────────────────────────
 dir=""
@@ -164,7 +128,7 @@ fi
 cost_str=""
 if [[ "$show_cost" == "true" && -n "$j_cost" && "$j_cost" != "0" ]]; then
   cost_rounded=$(printf "%.2f" "$j_cost" 2>/dev/null || echo "$j_cost")
-  cost_str="session cost: \$${cost_rounded}"
+  cost_str="Session cost: \$${cost_rounded}"
 fi
 
 # Duration formatting (ms → human)
@@ -172,13 +136,13 @@ duration_str=""
 if [[ "$show_duration" == "true" && -n "$j_duration" && "$j_duration" != "0" ]]; then
   ms="$j_duration"
   if (( ms >= 3600000 )); then
-    duration_str="session:$((ms/3600000))h$((ms%3600000/60000))m"
+    duration_str="Session:$((ms/3600000))h$((ms%3600000/60000))m"
   elif (( ms >= 60000 )); then
-    duration_str="session:$((ms/60000))m$((ms%60000/1000))s"
+    duration_str="Session:$((ms/60000))m$((ms%60000/1000))s"
   elif (( ms >= 1000 )); then
-    duration_str="session:$((ms/1000))s"
+    duration_str="Session:$((ms/1000))s"
   else
-    duration_str="session:${ms}ms"
+    duration_str="Session:${ms}ms"
   fi
 fi
 
@@ -189,16 +153,16 @@ if [[ "$show_tokens" == "true" ]]; then
     local n="$1"
     if [[ -z "$n" || "$n" == "0" ]]; then echo "0"; return; fi
     if (( n >= 1000000 )); then
-      printf "%.1fM" "$(awk "BEGIN{printf \"%.1f\", $n/1000000}")"
+      printf "%d.%dM" "$(( n / 1000000 ))" "$(( (n % 1000000) / 100000 ))"
     elif (( n >= 1000 )); then
-      printf "%.1fK" "$(awk "BEGIN{printf \"%.1f\", $n/1000}")"
+      printf "%d.%dK" "$(( n / 1000 ))" "$(( (n % 1000) / 100 ))"
     else
       echo "$n"
     fi
   }
   tok_in=$(fmt_tok "$j_tok_in")
   tok_out=$(fmt_tok "$j_tok_out")
-  tok_str="tokens: ${tok_in}↑${tok_out}↓"
+  tok_str="Tokens: ${tok_in}↑ ${tok_out}↓"
 fi
 
 # Burn rate (cost per minute)
@@ -207,7 +171,7 @@ if [[ "$show_burn_rate" == "true" && -n "$j_cost" && -n "$j_duration" \
       && "$j_cost" != "0" && "$j_duration" != "0" ]]; then
   burn=$(awk "BEGIN{printf \"%.4f\", $j_cost / ($j_duration / 60000)}" 2>/dev/null)
   if [[ -n "$burn" ]]; then
-    burn_str="burn: \$${burn}/m"
+    burn_str="Burn: \$${burn}/m"
   fi
 fi
 
@@ -219,7 +183,7 @@ if [[ "$show_lines" == "true" ]]; then
     [[ -n "$lines_str" ]] && lines_str="${lines_str}/"
     lines_str="${lines_str}-${j_lines_rm}"
   fi
-  [[ -n "$lines_str" ]] && lines_str="lines: ${lines_str}"
+  [[ -n "$lines_str" ]] && lines_str="Lines: ${lines_str}"
 fi
 
 # Context window size (human readable)
@@ -258,7 +222,7 @@ if [[ "$show_cache" == "true" ]]; then
   total_cache=$(( cache_read + cache_create + cur_input ))
   if (( total_cache > 0 )); then
     cache_pct=$(( cache_read * 100 / total_cache ))
-    cache_str="cache: ${cache_pct}%"
+    cache_str="Cache: ${cache_pct}%"
   fi
 fi
 
@@ -317,12 +281,13 @@ progress_bar() {
     dots)      fc="●" ec="○" ;;
     geometric) fc="▰" ec="▱" ;;
     line)      fc="━" ec="┄" ;;
+    segments)  fc="▊" ec="░" ;;
     *)         fc="█" ec="░" ;;
   esac
   local bar=""
   for (( i=0; i<filled; i++ )); do bar+="$fc"; done
   for (( i=0; i<empty; i++ )); do bar+="$ec"; done
-  echo "$bar"
+  echo "[${bar}]"
 }
 
 # ── Git string assembly ────────────────────────────────────────
@@ -334,16 +299,16 @@ fi
 # ── Vim mode string ────────────────────────────────────────────
 vim_str=""
 if [[ "$show_vim_mode" == "true" && -n "$j_vim" ]]; then
-  vim_str="vim: $j_vim"
+  vim_str="Vim: $j_vim"
 fi
 
-# ── Dashboard renderer ────────────────────────────────────────────
+# ── Dashboard renderer (2-line) ───────────────────────────────────
 render_dashboard() {
-  local line1="" line2="" line3="" sep=" $(c "$FG_GRAY")│${RST} "
+  local line1="" line2="" sep=" $(c "$FG_GRAY")│${RST} "
 
   # ── Line 1: model │ dir │ git │ vim │ effort │ version
   if [[ "$show_model" == "true" && -n "$j_model" ]]; then
-    line1+="$(c "$FG_CYAN")model: ${j_model}${RST}"
+    line1+="$(c "$FG_CYAN")Model: ${j_model}${RST}"
   fi
   if [[ -n "$dir" ]]; then
     [[ -n "$line1" ]] && line1+="$sep"
@@ -359,14 +324,14 @@ render_dashboard() {
   fi
   if [[ "$show_effort" == "true" && -n "$j_effort" ]]; then
     [[ -n "$line1" ]] && line1+="$sep"
-    line1+="$(c "$FG_LAVENDER")effort: ${j_effort}${RST}"
+    line1+="$(c "$FG_LAVENDER")Effort: ${j_effort}${RST}"
   fi
   if [[ "$show_version" == "true" && -n "$j_version" ]]; then
     [[ -n "$line1" ]] && line1+="$sep"
     line1+="$(c "$FG_GRAY")v${j_version}${RST}"
   fi
 
-  # ── Line 2: context │ cache │ current call tokens
+  # ── Line 2: ctx │ 5h │ 7d │ tokens │ cache │ session cost
   if [[ "$show_context" == "true" ]]; then
     if [[ "$j_has_usage" == "true" && -n "$j_ctx_used" && "$j_ctx_used" != "0" ]]; then
       # We have real context data
@@ -387,106 +352,52 @@ render_dashboard() {
           ctx_tokens_used=" ${used_fmt}/${ctx_size_str}"
         fi
       fi
-      local ctx_used_pct; ctx_used_pct=$(printf "%.1f" "$j_ctx_used" 2>/dev/null || echo "$j_ctx_used")
-      local ctx_rem_pct=""
-      if [[ -n "$j_ctx_remaining" && "$j_ctx_remaining" != "0" ]]; then
-        ctx_rem_pct=" $(printf "%.1f" "$j_ctx_remaining" 2>/dev/null || echo "$j_ctx_remaining")% rem"
-      fi
-      line2+="$(c "$ctx_c")ctx ${ctx_bar} ${ctx_used_pct}% used${RST}"
+      local ctx_used_pct; ctx_used_pct=$(printf "%.0f" "$j_ctx_used" 2>/dev/null || echo "${j_ctx_used%.*}")
+      line2+="$(c "$FG_GREEN")Context${RST} $(c "$ctx_c")${ctx_bar} ${ctx_used_pct}%${RST}"
       if [[ -n "$ctx_tokens_used" ]]; then
         line2+="$(c "$FG_GRAY")${ctx_tokens_used}${RST}"
       fi
-      if [[ -n "$ctx_rem_pct" ]]; then
-        line2+="$(c "$FG_GRAY")${ctx_rem_pct}${RST}"
-      fi
     elif [[ -n "$j_ctx_size" && "$j_ctx_size" != "0" ]]; then
       # No messages yet — show window size and waiting indicator
-      line2+="$(c "$FG_GRAY")ctx ░░░░░░░░░░ waiting… (window: ${ctx_size_str})${RST}"
+      line2+="$(c "$FG_GRAY")Context [░░░░░░░░░░] waiting… (window: ${ctx_size_str})${RST}"
     fi
   fi
-  # Session cost
-  if [[ -n "$cost_str" ]]; then
+  # 5h rate limit
+  if [[ "$show_rate_limits" == "true" && -n "$j_rl5_used" ]]; then
     [[ -n "$line2" ]] && line2+="$sep"
-    line2+="$(c "$FG_GOLD")${cost_str}${RST}"
+    local rl5_c; rl5_c=$(color_for_used "$j_rl5_used")
+    local rl5_pct_i; rl5_pct_i=$(printf "%.0f" "$j_rl5_used" 2>/dev/null || echo "${j_rl5_used%.*}")
+    local rl5_reset; rl5_reset=$(rl_reset_str "$j_rl5_reset")
+    line2+="$(c "$rl5_c")5h: ${rl5_pct_i}%${RST}"
+    [[ -n "$rl5_reset" ]] && line2+="$(c "$FG_GRAY")(${rl5_reset})${RST}"
   fi
-  # Cumulative cost (across all sessions)
-  if [[ -n "$cumulative_usd" && "$cumulative_usd" != "0" ]]; then
-    local cum_fmt; cum_fmt=$(printf "%.2f" "$cumulative_usd" 2>/dev/null || echo "$cumulative_usd")
+  # 7d rate limit
+  if [[ "$show_rate_limits" == "true" && -n "$j_rl7_used" ]]; then
     [[ -n "$line2" ]] && line2+="$sep"
-    line2+="$(c "$FG_PEACH")total: \$${cum_fmt}${RST}"
+    local rl7_c; rl7_c=$(color_for_used "$j_rl7_used")
+    local rl7_pct_i; rl7_pct_i=$(printf "%.0f" "$j_rl7_used" 2>/dev/null || echo "${j_rl7_used%.*}")
+    local rl7_reset; rl7_reset=$(rl_reset_str "$j_rl7_reset")
+    line2+="$(c "$rl7_c")7d: ${rl7_pct_i}%${RST}"
+    [[ -n "$rl7_reset" ]] && line2+="$(c "$FG_GRAY")(${rl7_reset})${RST}"
   fi
-  # Duration
-  if [[ -n "$duration_str" ]]; then
+  # Current-call tokens
+  if [[ -n "$tok_str" ]]; then
     [[ -n "$line2" ]] && line2+="$sep"
-    line2+="$(c "$FG_GRAY")${duration_str}${RST}"
+    line2+="$(c "$FG_LAVENDER")${tok_str}${RST}"
   fi
   # Cache hit ratio
   if [[ -n "$cache_str" ]]; then
     [[ -n "$line2" ]] && line2+="$sep"
     line2+="$(c "$FG_MINT")${cache_str}${RST}"
   fi
-  # Lines changed
-  if [[ -n "$lines_str" ]]; then
+  # Session cost
+  if [[ -n "$cost_str" ]]; then
     [[ -n "$line2" ]] && line2+="$sep"
-    line2+="$(c "$FG_GREEN")${lines_str}${RST}"
-  fi
-
-  # ── Line 3: session name │ rate limits │ tokens │ output style
-  if [[ -n "$j_session_name" ]]; then
-    line3+="$(c "$FG_CYAN")session: ${j_session_name}${RST}"
-  fi
-  if [[ "$show_rate_limits" == "true" && -n "$j_rl5_used" ]]; then
-    [[ -n "$line3" ]] && line3+="$sep"
-    local rl_c; rl_c=$(color_for_used "$j_rl5_used")
-    local rl5_reset; rl5_reset=$(rl_reset_str "$j_rl5_reset")
-    line3+="$(c "$rl_c")5h: ${j_rl5_used}%${RST}"
-    [[ -n "$rl5_reset" ]] && line3+="$(c "$FG_GRAY")(${rl5_reset})${RST}"
-  fi
-  if [[ "$show_rate_limits" == "true" && -n "$j_rl7_used" ]]; then
-    [[ -n "$line3" ]] && line3+="$sep"
-    line3+="$(c "$(color_for_used "$j_rl7_used")")7d: ${j_rl7_used}%${RST}"
-    local rl7_reset; rl7_reset=$(rl_reset_str "$j_rl7_reset")
-    [[ -n "$rl7_reset" ]] && line3+="$(c "$FG_GRAY")(${rl7_reset})${RST}"
-  fi
-  if [[ -n "$tok_str" ]]; then
-    [[ -n "$line3" ]] && line3+="$sep"
-    line3+="$(c "$FG_LAVENDER")${tok_str}${RST}"
-  fi
-  if [[ -n "$burn_str" ]]; then
-    [[ -n "$line3" ]] && line3+="$sep"
-    line3+="$(c "$FG_PEACH")${burn_str}${RST}"
-  fi
-  if [[ -n "$api_time_str" ]]; then
-    [[ -n "$line3" ]] && line3+="$sep"
-    line3+="$(c "$FG_GRAY")${api_time_str}${RST}"
-  fi
-  if [[ -n "$cpl_str" ]]; then
-    [[ -n "$line3" ]] && line3+="$sep"
-    line3+="$(c "$FG_GOLD")${cpl_str}${RST}"
-  fi
-  if [[ -n "$j_output_style" ]]; then
-    [[ -n "$line3" ]] && line3+="$sep"
-    line3+="$(c "$FG_GRAY")style: ${j_output_style}${RST}"
-  fi
-
-  # ── Line 4: warnings (only shown when needed)
-  local line4=""
-  local ctx_pct="${j_ctx_used:-0}"; ctx_pct="${ctx_pct%.*}"
-  if [[ "$show_ctx_warning" == "true" && "$j_has_usage" == "true" && "$ctx_pct" -ge 90 ]]; then
-    line4+="$(c "$FG_RED")⚠ context at ${ctx_pct}% — consider /compact${RST}"
-  elif [[ "$show_ctx_warning" == "true" && "$j_has_usage" == "true" && "$ctx_pct" -ge 80 ]]; then
-    line4+="$(c "$FG_ORANGE")⚠ context usage at ${ctx_pct}%${RST}"
-  fi
-  local rl5_pct="${j_rl5_used:-0}"; rl5_pct="${rl5_pct%.*}"
-  if [[ "$show_ctx_warning" == "true" && "$rl5_pct" -ge 90 ]]; then
-    [[ -n "$line4" ]] && line4+="  "
-    line4+="$(c "$FG_RED")⚠ 5h rate limit at ${rl5_pct}%${RST}"
+    line2+="$(c "$FG_GOLD")${cost_str}${RST}"
   fi
 
   printf '%s\n' "${line1}"
   [[ -n "$line2" ]] && printf '%s\n' "${line2}"
-  [[ -n "$line3" ]] && printf '%s\n' "${line3}"
-  [[ -n "$line4" ]] && printf '%s\n' "${line4}"
   return 0
 }
 
